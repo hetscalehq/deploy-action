@@ -1,0 +1,319 @@
+name: CI
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+      - name: Test with coverage
+        run: npm test
+
+  # Runs the action as a workflow does, through action.yml, against a loopback stub of the API.
+  self-test:
+    name: self-test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    env:
+      TOKEN: '1|stub_token'
+      GROUP: grp_01k7hsc0000000000000000001
+      FIRST_RELEASE: rel_01k7hsc0000000000000000001
+      SEED: node_01k7hsc0000000000000000001
+      FRESH: node_01k7hsc0000000000000000004
+      DOOMED: node_01k7hsc0000000000000000005
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+
+      - name: Start the API stub
+        id: stub
+        run: node test/stub-server.mjs start
+
+      # A deploy to the running servers: lock, release, nodes, the job's own deploy, deployed, unlock.
+      - name: Take the deploy lock
+        id: lock
+        uses: ./
+        with:
+          command: lock
+          token: ${{ env.TOKEN }}
+          group: ${{ env.GROUP }}
+          api-url: ${{ steps.stub.outputs.url }}
+
+      - name: Record the release
+        id: release
+        uses: ./
+        with:
+          command: release
+          token: ${{ env.TOKEN }}
+          group: ${{ env.GROUP }}
+          ref: ghcr.io/acme/app:${{ github.sha }}
+          api-url: ${{ steps.stub.outputs.url }}
+
+      - name: Record the same release again
+        id: repeat
+        uses: ./
+        with:
+          command: release
+          token: ${{ env.TOKEN }}
+          group: ${{ env.GROUP }}
+          ref: ghcr.io/acme/app:${{ github.sha }}
+          api-url: ${{ steps.stub.outputs.url }}
+
+      # One server still boots the earlier release and serves after one poll; two wait for their
+      # pipeline and stay out when the wait ends.
+      - name: Read the serving servers
+        id: nodes
+        uses: ./
+        with:
+          command: nodes
+          token: ${{ env.TOKEN }}
+          group: ${{ env.GROUP }}
+          release-id: ${{ steps.release.outputs.release-id }}
+          wait: 20
+          api-url: ${{ steps.stub.outputs.url }}
+
+      - name: Deploy to each server
+        env:
+          HOSTS: ${{ steps.nodes.outputs.hosts }}
+          COUNT: ${{ steps.nodes.outputs.count }}
+        run: |
+          deployed=0
+          while IFS= read -r host; do
+            [ -n "$host" ] || continue
+            deployed=$((deployed + 1))
+          done <<< "$HOSTS"
+          echo "Deployed to $deployed servers."
+          test "$deployed" = "$COUNT"
+
+      - name: Report the servers deployed
+        id: deployed
+        uses: ./
+        with:
+          command: deployed
+          token: ${{ env.TOKEN }}
+          release-id: ${{ steps.release.outputs.release-id }}
+          node-ids: |
+            ${{ steps.nodes.outputs.managed-node-ids }}
+            ${{ env.SEED }}
+          api-url: ${{ steps.stub.outputs.url }}
+
+      - name: Read the servers at an address the seed lacks
+        id: broken
+        continue-on-error: true
+        uses: ./
+        with:
+          command: nodes
+          token: ${{ env.TOKEN }}
+          group: ${{ env.GROUP }}
+          address: private_ip
+          api-url: ${{ steps.stub.outputs.url }}
+
+      - name: Release the deploy lock
+        id: unlock
+        if: always() && steps.lock.outcome != 'skipped'
+        uses: ./
+        with:
+          command: unlock
+          token: ${{ env.TOKEN }}
+          group: ${{ env.GROUP }}
+          api-url: ${{ steps.stub.outputs.url }}
+
+      # The stub answers the first rollout 503, so the action retries it with the same key.
+      - name: Replace the older servers
+        id: rollout
+        uses: ./
+        with:
+          command: rollout
+          token: ${{ env.TOKEN }}
+          group: ${{ env.GROUP }}
+          api-url: ${{ steps.stub.outputs.url }}
+
+      - name: Start a second rollout
+        id: rollout-again
+        uses: ./
+        with:
+          command: rollout
+          token: ${{ env.TOKEN }}
+          group: ${{ env.GROUP }}
+          api-url: ${{ steps.stub.outputs.url }}
+
+      # A new server, dispatched twice: the second run must deploy and report nothing.
+      - name: Read the new server
+        id: node
+        uses: ./
+        with:
+          command: node
+          token: ${{ env.TOKEN }}
+          group: ${{ env.GROUP }}
+          node-id: ${{ env.FRESH }}
+          release-id: ${{ env.FIRST_RELEASE }}
+          api-url: ${{ steps.stub.outputs.url }}
+
+      - name: Report the new server ready
+        id: ready
+        if: steps.node.outputs.deploy == 'true'
+        uses: ./
+        with:
+          command: ready
+          token: ${{ env.TOKEN }}
+          node-id: ${{ env.FRESH }}
+          release-id: ${{ env.FIRST_RELEASE }}
+          generation: 1
+          api-url: ${{ steps.stub.outputs.url }}
+
+      - name: Read the new server for a repeated dispatch
+        id: again
+        uses: ./
+        with:
+          command: node
+          token: ${{ env.TOKEN }}
+          group: ${{ env.GROUP }}
+          node-id: ${{ env.FRESH }}
+          release-id: ${{ env.FIRST_RELEASE }}
+          api-url: ${{ steps.stub.outputs.url }}
+
+      - name: Report ready for the repeated dispatch
+        id: ready-again
+        if: steps.again.outputs.deploy == 'true'
+        uses: ./
+        with:
+          command: ready
+          token: ${{ env.TOKEN }}
+          node-id: ${{ env.FRESH }}
+          release-id: ${{ env.FIRST_RELEASE }}
+          generation: 1
+          api-url: ${{ steps.stub.outputs.url }}
+
+      - name: Report a failed deploy
+        id: failed
+        uses: ./
+        with:
+          command: failed
+          token: ${{ env.TOKEN }}
+          node-id: ${{ env.DOOMED }}
+          release-id: ${{ env.FIRST_RELEASE }}
+          generation: 1
+          api-url: ${{ steps.stub.outputs.url }}
+
+      - name: Report ready after the failure
+        id: late
+        continue-on-error: true
+        uses: ./
+        with:
+          command: ready
+          token: ${{ env.TOKEN }}
+          node-id: ${{ env.DOOMED }}
+          release-id: ${{ env.FIRST_RELEASE }}
+          generation: 1
+          api-url: ${{ steps.stub.outputs.url }}
+
+      - name: Check the outputs
+        env:
+          LOCKED_UNTIL: ${{ steps.lock.outputs.locked-until }}
+          CREATED: ${{ steps.release.outputs.created }}
+          REPEAT_CREATED: ${{ steps.repeat.outputs.created }}
+          SAME_RELEASE: ${{ steps.repeat.outputs.release-id == steps.release.outputs.release-id }}
+          HOSTS: ${{ steps.nodes.outputs.hosts }}
+          ADOPTED_HOSTS: ${{ steps.nodes.outputs.adopted-hosts }}
+          MANAGED: ${{ steps.nodes.outputs.managed-node-ids }}
+          COUNT: ${{ steps.nodes.outputs.count }}
+          IN_FLIGHT_OLDER: ${{ steps.nodes.outputs.in-flight-older }}
+          REPORTED: ${{ steps.deployed.outputs.reported }}
+          SKIPPED: ${{ steps.deployed.outputs.skipped }}
+          BROKEN: ${{ steps.broken.outcome }}
+          UNLOCK: ${{ steps.unlock.outcome }}
+          ROLLOUT_ID: ${{ steps.rollout.outputs.rollout-id }}
+          ROLLOUT_OLDER: ${{ steps.rollout.outputs.older }}
+          SECOND_ROLLOUT_ID: ${{ steps.rollout-again.outputs.rollout-id }}
+          DEPLOY: ${{ steps.node.outputs.deploy }}
+          ADDRESS: ${{ steps.node.outputs.address }}
+          READY_PHASE: ${{ steps.ready.outputs.phase }}
+          DEPLOY_AGAIN: ${{ steps.again.outputs.deploy }}
+          READY_AGAIN: ${{ steps.ready-again.outcome }}
+          FAILED_PHASE: ${{ steps.failed.outputs.phase }}
+          LATE: ${{ steps.late.outcome }}
+        run: |
+          fail=0
+          check() {
+            local value
+            value=$(printf '%s' "$2" | tr -d '\r')
+            if [ "$value" != "$3" ]; then
+              echo "::error::$1 is '$value', expected '$3'"
+              fail=1
+            fi
+          }
+          check locked-until "$( [ -n "$LOCKED_UNTIL" ] && echo set)" set
+          check created "$CREATED" true
+          check "created on repeat" "$REPEAT_CREATED" false
+          check "same release on repeat" "$SAME_RELEASE" true
+          check hosts "$HOSTS" $'203.0.113.10\n203.0.113.11\n203.0.113.12'
+          check adopted-hosts "$ADOPTED_HOSTS" 203.0.113.10
+          check managed-node-ids "$MANAGED" $'node_01k7hsc0000000000000000002\nnode_01k7hsc0000000000000000003'
+          check count "$COUNT" 3
+          check in-flight-older "$IN_FLIGHT_OLDER" "$FRESH"$'\n'"$DOOMED"
+          check reported "$REPORTED" 2
+          check skipped "$SKIPPED" 1
+          check "missing address" "$BROKEN" failure
+          check unlock "$UNLOCK" success
+          check rollout-id "$ROLLOUT_ID" rol_01k7hsc0000000000000000001
+          check older "$ROLLOUT_OLDER" 2
+          check "second rollout-id" "$SECOND_ROLLOUT_ID" ''
+          check deploy "$DEPLOY" true
+          check address "$ADDRESS" 203.0.113.13
+          check "ready phase" "$READY_PHASE" HEALTH_CHECKING
+          check "deploy on repeat" "$DEPLOY_AGAIN" false
+          check "ready on repeat" "$READY_AGAIN" skipped
+          check "failed phase" "$FAILED_PHASE" DEPLOY_FAILED
+          check "ready after failure" "$LATE" failure
+          exit "$fail"
+
+      - name: Check the requests the stub saw
+        if: always() && steps.stub.outcome == 'success'
+        env:
+          STUB_URL: ${{ steps.stub.outputs.url }}
+        run: node test/stub-server.mjs verify "$STUB_URL"
+
+  pr-title:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+      - name: Check the pull request title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: node scripts/pr-title.mjs

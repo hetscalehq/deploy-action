@@ -1,0 +1,101 @@
+name: Hetscale Deploy
+description: Take a Hetscale group's deploy lock, record releases, list the servers to deploy to and report deploys.
+author: Hetscale
+branding:
+  icon: upload-cloud
+  color: green
+
+inputs:
+  command:
+    description: 'What to do: lock, unlock, release, nodes, node, deployed, rollout, ready or failed.'
+    required: true
+  token:
+    description: 'Hetscale API token (<id>|<secret>), always from a secret, such as secrets.HETSCALE_TOKEN.'
+    required: true
+  group:
+    description: 'Node group id (grp_...): lock, unlock, release, nodes, node and rollout.'
+    required: false
+  ttl:
+    description: 'lock: seconds until the lock ends on its own, from 60 to 7200. Run lock again to set a new end.'
+    required: false
+    default: '1800'
+  reason:
+    description: 'lock: why the lock is held, at most 200 characters (default: repository, commit and run). failed: why the deploy failed, at most 500 characters (default: a link to the run).'
+    required: false
+  ref:
+    description: 'release: what the group deploys or boots from: an image digest, a tag or a commit on a webhook group, the numeric snapshot id on a snapshot group.'
+    required: false
+  build-id:
+    description: 'release: your own build id, at most 120 characters; empty sends none.'
+    required: false
+    default: ${{ github.sha }}
+  release-id:
+    description: 'Release id (rel_...): needed by node, deployed, ready and failed; on nodes, the release just recorded, to wait for servers that started on an earlier one.'
+    required: false
+  address:
+    description: 'nodes and node: which address to give, ipv4 or private_ip.'
+    required: false
+    default: ipv4
+  wait:
+    description: 'nodes with release-id: seconds to wait, from 0 to 3600, while servers that started on an earlier release are still starting. 0 does not wait.'
+    required: false
+    default: '600'
+  node-id:
+    description: 'node, ready and failed: the node id (node_...), as node.created sent it.'
+    required: false
+  node-ids:
+    description: 'deployed: node ids separated by spaces or new lines, normally the managed-node-ids output of nodes.'
+    required: false
+  generation:
+    description: 'ready and failed: the group generation the node was created for, as node.created sent it.'
+    required: false
+  api-url:
+    description: 'Base URL of the Hetscale API. Leave it unset.'
+    required: false
+    default: https://api.hetscale.com/v1
+
+outputs:
+  locked-until:
+    description: 'lock: when the lock ends on its own (ISO 8601).'
+  release-id:
+    description: 'release: the id of the current release (rel_...).'
+  release-version:
+    description: 'release: its number within the group.'
+  generation:
+    description: "release: the group's generation after the release."
+  created:
+    description: 'release: true when a new release was recorded, false when it already was the current one.'
+  hosts:
+    description: 'nodes: the address of each serving server, the seed included, one per line.'
+  adopted-hosts:
+    description: 'nodes: the address of each serving seed server (class adopted), which a rollout never replaces, one per line.'
+  managed-node-ids:
+    description: 'nodes: the ids of the serving servers Hetscale manages, one per line, for deployed.'
+  count:
+    description: 'nodes: how many servers serve.'
+  nodes:
+    description: 'nodes: the serving servers as a JSON array of the API''s node objects.'
+  in-flight-older:
+    description: 'nodes: ids of servers still starting on an earlier release when the wait ended, one per line.'
+  deploy:
+    description: 'node: true while the node waits for its deploy (BOOTING or DEPLOYING), false otherwise.'
+  address:
+    description: 'node: the address of the node, from the inventory.'
+  release-ref:
+    description: "node: the ref of the node's release, the build to deploy."
+  build-id:
+    description: "node: the build id of the node's release."
+  phase:
+    description: 'node, ready and failed: the phase of the node.'
+  reported:
+    description: 'deployed: how many nodes were reported.'
+  skipped:
+    description: 'deployed: how many nodes were not reported because they left, failed or are not managed.'
+  rollout-id:
+    description: 'rollout: the id of the rollout that started; empty when none started.'
+  older:
+    description: 'rollout: how many servers were older when the rollout started.'
+
+runs:
+  using: node24
+  main: src/main.js
