@@ -66,7 +66,7 @@ describe('lock', () => {
       const result = await act({ command: 'lock', ...inputs });
       assert.equal(result.code, 1);
       assert.equal(result.requests.length, 0);
-      assert.match(result.log, new RegExp(`::error::${message.replace(/[.()]/g, '\\$&')}`));
+      assert.ok(result.log.includes(`::error::${message}`), result.log);
     });
   }
 
