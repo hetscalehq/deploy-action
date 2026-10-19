@@ -2,7 +2,7 @@
 
 A GitHub Action for [Hetscale](https://hetscale.com) node groups. It takes a group's deploy lock, records the release your pipeline built, lists the servers to deploy to, and reports each deploy back, so a workflow needs no curl, jq or bash of its own for the [Hetscale API](https://hetscale.com/docs/api).
 
-Use it as `hetscalehq/deploy-action@v1`, one step per call. The workflows below do what the [GitHub Actions recipes](https://hetscale.com/docs/github-actions) do with curl and jq.
+Use it as `hetscalehq/deploy-action@v1`, one step per call. The [GitHub Actions page](https://hetscale.com/docs/github-actions) walks through the same workflows, with the relay that starts the new-server workflow.
 
 - [Commands](#commands)
 - [Deploy a release to the running servers](#deploy-a-release-to-the-running-servers)
