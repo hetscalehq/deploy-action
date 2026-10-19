@@ -5,6 +5,7 @@ import { IDS, TOKEN, act, json } from './helpers.js';
 const lock = { command: 'lock', group: IDS.group };
 const locked = () => json(200, { locked_until: '2026-10-17T12:30:00Z', reason: 'x' });
 const status = (code, body = { message: 'Busy.', code: 'x' }, headers = {}) => () => json(code, body, headers);
+const limited = (seconds) => status(429, { message: 'Slow down.', code: 'rate_limited' }, { 'Retry-After': String(seconds) });
 const keys = (result) => result.requests.map((request) => request.headers['Idempotency-Key']);
 
 describe('every request', () => {
@@ -83,11 +84,41 @@ describe('retries', () => {
   });
 
   it('gives up when the next wait would pass five minutes', async () => {
-    const limited = status(429, { message: 'Slow down.', code: 'rate_limited' }, { 'Retry-After': '120' });
-    const result = await act(lock, [limited, limited, limited]);
+    const result = await act(lock, [limited(120), limited(120), limited(120)]);
     assert.equal(result.code, 1);
     assert.deepEqual(result.sleeps, [120_000, 120_000]);
     assert.match(result.log, /gave up after 3 attempts\.%0AHint: the organisation's rate limit/);
+  });
+
+  it('gives the last attempt only the time left in five minutes', async (t) => {
+    // The fake clock moves only with sleeps, so a fetch that hangs lasts as long as the timeout it
+    // was given: the timeouts are recorded, and the hanging fetch fails at once as one that timed out.
+    const timeout = t.mock.method(AbortSignal, 'timeout');
+    const hang = () => {
+      throw new DOMException('The operation timed out.', 'TimeoutError');
+    };
+    const result = await act(lock, [limited(120), limited(120), limited(59), hang]);
+    const timeouts = timeout.mock.calls.map((call) => call.arguments[0]);
+    const ended = result.sleeps.reduce((sum, ms) => sum + ms, 0) + timeouts.at(-1);
+    assert.ok(ended <= 300_000, `the call ended after ${ended} ms`);
+    assert.deepEqual(result.sleeps, [120_000, 120_000, 59_000]);
+    assert.deepEqual(timeouts, [30_000, 30_000, 30_000, 1000]);
+    assert.equal(result.code, 1);
+    assert.match(result.log, /::error::POST \/groups\/.*\/lock timed out; gave up after 4 attempts\./);
+  });
+
+  it('starts no attempt with less than a second left', async () => {
+    const result = await act(lock, [limited(120), limited(120), limited(60)]);
+    assert.equal(result.code, 1);
+    assert.deepEqual(result.sleeps, [120_000, 120_000]);
+    assert.match(result.log, /::error::POST \/groups\/.*\/lock was answered 429 rate_limited; gave up after 3 attempts\./);
+  });
+
+  it('starts no attempt with less than a second left after a sleep that ends late', async () => {
+    const result = await act(lock, [limited(120), limited(120), limited(58)], { late: 500 });
+    assert.equal(result.code, 1);
+    assert.deepEqual(result.sleeps, [120_000, 120_000, 58_000]);
+    assert.match(result.log, /::error::POST \/groups\/.*\/lock was answered 429 rate_limited; gave up after 3 attempts\./);
   });
 
   it('never retries provider_error', async () => {

@@ -5,6 +5,7 @@ import { ActionError } from './runner.js';
 const TIMEOUT_MS = 30_000;
 const ATTEMPTS = 6;
 const BUDGET_MS = 300_000;
+const MIN_ATTEMPT_MS = 1000;
 const BACKOFF_S = [2, 5, 10, 20, 20];
 
 async function read(response) {
@@ -58,7 +59,9 @@ export function createClient({ command, baseUrl, token, userAgent, fetch, sleep,
     if (payload !== undefined) headers['Content-Type'] = 'application/json';
     if (method === 'POST') headers['Idempotency-Key'] = randomUUID();
     const started = now();
+    const left = () => BUDGET_MS - (now() - started);
 
+    // Each attempt gets at most the time left in the budget, and none starts with less than a second.
     for (let attempt = 1; ; attempt += 1) {
       let answer;
       let failure;
@@ -69,7 +72,7 @@ export function createClient({ command, baseUrl, token, userAgent, fetch, sleep,
           headers,
           body: payload,
           redirect: 'manual',
-          signal: AbortSignal.any([signal, AbortSignal.timeout(TIMEOUT_MS)]),
+          signal: AbortSignal.any([signal, AbortSignal.timeout(Math.min(TIMEOUT_MS, left()))]),
         });
         answer = await read(response);
       } catch (error) {
@@ -94,12 +97,14 @@ export function createClient({ command, baseUrl, token, userAgent, fetch, sleep,
         failure = `was answered ${label(answer)}`;
       }
 
-      if (attempt >= ATTEMPTS || now() - started + wait * 1000 > BUDGET_MS) {
-        const help = answer && hint(command, answer.status, answer.code);
-        throw new ActionError(`${method} ${path} ${failure}; gave up after ${attempt} attempts.${help ? `\nHint: ${help}.` : ''}`);
+      if (attempt < ATTEMPTS && left() - wait * 1000 >= MIN_ATTEMPT_MS) {
+        log.info(`${method} ${path} ${failure}; trying again in ${wait.toFixed(1)} s.`);
+        await sleep(wait * 1000);
+        // A sleep can end late, so the time left is checked again as the attempt starts.
+        if (left() >= MIN_ATTEMPT_MS) continue;
       }
-      log.info(`${method} ${path} ${failure}; trying again in ${wait.toFixed(1)} s.`);
-      await sleep(wait * 1000);
+      const help = answer && hint(command, answer.status, answer.code);
+      throw new ActionError(`${method} ${path} ${failure}; gave up after ${attempt} attempts.${help ? `\nHint: ${help}.` : ''}`);
     }
   };
 }

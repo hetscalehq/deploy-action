@@ -79,8 +79,9 @@ export function json(status, body, headers = {}) {
 }
 
 // Runs the action once with the declared defaults, a fake fetch that answers from a queue, a fake
-// clock that only sleeps move, and GITHUB_OUTPUT in a temporary file.
-export async function act(values, answers = [], { env = {}, signal } = {}) {
+// clock that only sleeps move (each one `late` ms past what it asked for), and GITHUB_OUTPUT in a
+// temporary file.
+export async function act(values, answers = [], { env = {}, signal, late = 0 } = {}) {
   const file = join(mkdtempSync(join(tmpdir(), 'deploy-action-')), 'output');
   const queue = [...answers];
   const requests = [];
@@ -103,7 +104,7 @@ export async function act(values, answers = [], { env = {}, signal } = {}) {
     fetch,
     sleep: async (ms) => {
       sleeps.push(ms);
-      clock += ms;
+      clock += ms + late;
     },
     now: () => clock,
     random: () => 0.5,
